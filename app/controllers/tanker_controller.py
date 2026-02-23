@@ -1,66 +1,90 @@
-from typing import List, Dict
+from app.config import supabase
+from app.services.tanker_allocator import allocate_tankers
+from datetime import date
 
-def allocate_tankers(villages: List[Dict], available_tankers: List[Dict]) -> List[Dict]:
-    """
-    Priority-Based Tanker Allocation Algorithm
 
-    Priority Order:
-    1. Severity (CRITICAL > HIGH > MEDIUM > LOW)
-    2. Stress Score (higher first)
-    3. Population (higher first)
+async def get_all_tankers():
+    res = supabase.table("tankers").select("*").execute()
+    return {"success": True, "data": res.data}
 
-    Only villages with tankers_needed > 0 are considered.
-    Allocation continues until tankers run out.
-    """
 
-    severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
-
-    # Filter villages that actually need tankers
-    needy_villages = [
-        v for v in villages
-        if v.get("tankers_needed", 0) > 0
+async def seed_tankers():
+    tankers = [
+        {
+            "registration_no": f"MH-NK-{1001 + i}",
+            "capacity_liters": 10000,
+            "current_district": "Nagpur",
+            "status": "available"
+        }
+        for i in range(12)
     ]
 
-    # Sort villages by priority
-    prioritized = sorted(
-        needy_villages,
-        key=lambda v: (
-            severity_order.get(v.get("severity"), 4),
-            -v.get("stress_score", 0),
-            -v.get("population", 0)
-        )
-    )
+    res = supabase.table("tankers").insert(tankers).execute()
+    return {"success": True, "data": res.data, "message": "12 tankers seeded"}
 
-    tanker_pool = list(available_tankers)  # Copy list
-    allocations = []
 
-    for village in prioritized:
-        if not tanker_pool:
-            break  # Stop if no tankers left
+async def run_allocation():
+    today = date.today().isoformat()
 
-        needed = village.get("tankers_needed", 0)
+    stress_res = supabase.table("water_stress_index")\
+        .select("*, villages(name, population, district)")\
+        .eq("calculated_date", today)\
+        .execute()
 
-        # Assign available tankers (may be partial if limited)
-        assigned = tanker_pool[:needed]
-        tanker_pool = tanker_pool[needed:]
+    if not stress_res.data:
+        return {
+            "success": False,
+            "error": "No stress data for today. Run /api/villages/calculate-all-stress first."
+        }
 
-        assigned_count = len(assigned)
+    tanker_res = supabase.table("tankers")\
+        .select("*")\
+        .eq("status", "available")\
+        .execute()
 
-        allocations.append({
-            "village_id": village.get("id", village.get("village_id", "UNKNOWN")),
-            "village_name": village.get("name", "Unknown"),
-            "district": village.get("district", "Unknown"),
-            "severity": village.get("severity", "Unknown"),
-            "stress_score": village.get("stress_score", 0),
-            "population": village.get("population", 0),
-            "tankers_needed": needed,
-            "tankers_assigned": [t.get("id") for t in assigned],
-            "tankers_count": assigned_count,
-            "fully_covered": assigned_count >= needed,
-            "coverage_percent": (
-                round((assigned_count / needed) * 100)
-                if needed > 0 else 100
-            )
-        })
+    villages_for_alloc = [
+        {
+            "id": s["village_id"],
+            "name": s.get("villages", {}).get("name"),
+            "district": s.get("villages", {}).get("district"),
+            "population": s.get("villages", {}).get("population"),
+            "stress_score": s["stress_score"],
+            "severity": s["severity"],
+            "tankers_needed": s["tankers_needed"]
+        }
+        for s in stress_res.data
+    ]
 
-    return allocations
+    allocations = allocate_tankers(villages_for_alloc, tanker_res.data or [])
+
+    for alloc in allocations:
+        for tanker_id in alloc["tankers_assigned"]:
+            supabase.table("tanker_allocations").insert({
+                "tanker_id": tanker_id,
+                "village_id": alloc["village_id"],
+                "allocated_date": today,
+                "status": "active"
+            }).execute()
+
+            supabase.table("tankers")\
+                .update({"status": "deployed"})\
+                .eq("id", tanker_id)\
+                .execute()
+
+    return {
+        "success": True,
+        "total_tankers_used": sum(a["tankers_count"] for a in allocations),
+        "villages_covered": len([a for a in allocations if a["tankers_count"] > 0]),
+        "allocations": allocations
+    }
+
+
+async def get_allocations():
+    today = date.today().isoformat()
+
+    res = supabase.table("tanker_allocations")\
+        .select("*, tankers(registration_no, capacity_liters), villages(name, district)")\
+        .eq("allocated_date", today)\
+        .execute()
+
+    return {"success": True, "data": res.data}
