@@ -17,7 +17,7 @@ def calculate_stress_score(rainfall_data: List[Dict], groundwater_data: List[Dic
         avg_normal = sum(r["normal_rainfall_mm"] for r in rainfall_data) / len(rainfall_data)
 
         if avg_normal > 0:
-            deviation = (avg_normal - avg_actual) / avg_normal  # 0 to 1+
+            deviation = max(0, (avg_normal - avg_actual) / avg_normal)
         else:
             deviation = 0
 
@@ -34,7 +34,7 @@ def calculate_stress_score(rainfall_data: List[Dict], groundwater_data: List[Dic
 
         # If level < threshold => danger
         # Higher the level relative to threshold = safer
-        danger_ratio = threshold / level if level > 0 else 2
+        danger_ratio = level / threshold if level > 0 else 2
         gw_score = min(danger_ratio * 2.5, 5.0)
 
     total_score = round(rainfall_score + gw_score, 2)
@@ -59,6 +59,7 @@ def get_tankers_needed(score: float, population: int) -> int:
     - 1 tanker per 500 people at full crisis (score=10)
     - Scaled proportionally by score
     """
+    if score < 6: return 0
     base = population / 500
     factor = score / 10
     return max(1, round(base * factor))
